@@ -1,6 +1,7 @@
 import logging
 import select
 import socket
+import threading
 import time
 from collections import defaultdict
 
@@ -19,8 +20,7 @@ def resolve_recursive(question, root_dns_server=('198.41.0.4', 53)):
     current_qtype = question.qtype
 
     cache_key = (current_qname, current_qtype)
-    if (cache_key in dns_cache and time.time() - dns_cache[cache_key][
-        "timestamp"]
+    if (cache_key in dns_cache and time.time() - dns_cache[cache_key]["timestamp"]
             < min(ttl for _, ttl in dns_cache[cache_key]["records"])):
         logger.info("Answer found in cache for %s", current_qname)
         return dns_cache[cache_key]["records"]
@@ -34,18 +34,15 @@ def resolve_recursive(question, root_dns_server=('198.41.0.4', 53)):
             data, _ = dns_socket.recvfrom(1024)
             response = DNSRecord.parse(data)
             if response.rr:
-                logger.info("Answer found in the response: %s",
-                            response.rr[0].rdata)
+                logger.info("Answer found in the response: %s", response.rr[0].rdata)
 
                 dns_cache[cache_key]["timestamp"] = time.time()
-                dns_cache[cache_key]["records"] = [(rr, rr.ttl) for rr
-                                                   in response.rr]
+                dns_cache[cache_key]["records"] = [(rr, rr.ttl) for rr in response.rr]
 
                 return dns_cache[cache_key]["records"]
             for rrset in response.ar:
                 if rrset.rtype == 1:
-                    return resolve_recursive(question,
-                                             (str(rrset.rdata), 53))
+                    return resolve_recursive(question, (str(rrset.rdata), 53))
         except socket.timeout:
             pass
 
@@ -76,6 +73,14 @@ def handle_dns_request(data):
         return None
 
 
+def handle_client(client_socket):
+    data = client_socket.recv(1024)
+    response_data = handle_dns_request(data)
+    if response_data:
+        client_socket.send(response_data)
+    client_socket.close()
+
+
 def main():
     host = '127.0.0.1'
     port = 53
@@ -85,7 +90,7 @@ def main():
 
     tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcp_socket.bind((host, port))
-    tcp_socket.listen(1)
+    tcp_socket.listen(5)
 
     logger.info("DNS server listening on %s:%d", host, port)
 
@@ -99,12 +104,8 @@ def main():
                     if response_data:
                         udp_socket.sendto(response_data, addr)
                 elif s is tcp_socket:
-                    client_socket, client_addr = tcp_socket.accept()
-                    data = client_socket.recv(1024)
-                    response_data = handle_dns_request(data)
-                    if response_data:
-                        client_socket.send(response_data)
-                    client_socket.close()
+                    client_socket, _ = tcp_socket.accept()
+                    threading.Thread(target=handle_client, args=(client_socket,)).start()
         except KeyboardInterrupt:
             break
 
